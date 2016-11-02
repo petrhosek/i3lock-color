@@ -5,3 +5,5 @@ st for i3lock with colors
 * Let the user specify 3 colors and have it generate shades based off them
 * Rainbow mode / random color mode?
 * fix up the man page
+* Tidy up code in general
+* Read from file?

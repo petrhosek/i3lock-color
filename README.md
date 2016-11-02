@@ -34,6 +34,7 @@ Many little improvements have been made to i3lock over time:
      - `-k, --clock` -- enables the clock display.
      - `--timestr="%H:%M:%S"` -- allows custom overriding of the time format string. Accepts `strftime` formatting. Default is `"%H:%M:%S"`.
      - `--datestr="%A, %m %Y"` -- allows custom overriding of the date format string. Accepts `strftime` formatting. Default is `"%A, %m %Y"`.
+		 - `-B, --blur` -- takes the current screen and blurs it, setting it as the background image. Images specified with `-i` are overlayed on top of this, so transparent images can be used for text/icon overlays.
   - All the colors have an alpha channel now. Please keep in mind that this was not intended when the program was originally written, so making things transparent that weren't before can make it look strange.
 
 - You can specify whether i3lock should bell upon a wrong password.
@@ -60,12 +61,12 @@ Requirements
 
 Running i3lock
 --------------
-Simply invoke the 'i3lock-color' command. To get out of it, enter your password and
+Simply invoke the 'i3lock' command. To get out of it, enter your password and
 press enter.
 
 Example usage for colors:
 
-i3lock-color --insidevercolor=0000a0bf --insidewrongcolor=ff8000bf --insidecolor=ffffffbf --ringvercolor=0020ffff --ringwrongcolor=4040ffff --ringcolor=404090ff --textcolor=ffffffff  --separatorcolor=aaaaaaff --keyhlcolor=30ccccff --bshlcolor=ff8000ff -r
+i3lock --insidevercolor=0000a0bf --insidewrongcolor=ff8000bf --insidecolor=ffffffbf --ringvercolor=0020ffff --ringwrongcolor=4040ffff --ringcolor=404090ff --textcolor=ffffffff  --separatorcolor=aaaaaaff --keyhlcolor=30ccccff --bshlcolor=ff8000ff -r
 
 
 Upstream
