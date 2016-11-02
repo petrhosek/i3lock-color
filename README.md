@@ -34,7 +34,7 @@ Many little improvements have been made to i3lock over time:
      - `-k, --clock` -- enables the clock display.
      - `--timestr="%H:%M:%S"` -- allows custom overriding of the time format string. Accepts `strftime` formatting. Default is `"%H:%M:%S"`.
      - `--datestr="%A, %m %Y"` -- allows custom overriding of the date format string. Accepts `strftime` formatting. Default is `"%A, %m %Y"`.
-		 - `-B, --blur` -- takes the current screen and blurs it, setting it as the background image. Images specified with `-i` are overlayed on top of this, so transparent images can be used for text/icon overlays.
+     - `-B, --blur` -- takes the current screen and blurs it, setting it as the background image. Images specified with `-i` are overlayed on top of this, so transparent images can be used for text/icon overlays.
   - All the colors have an alpha channel now. Please keep in mind that this was not intended when the program was originally written, so making things transparent that weren't before can make it look strange.
 
 - You can specify whether i3lock should bell upon a wrong password.
