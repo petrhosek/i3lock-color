@@ -140,6 +140,8 @@ xcb_pixmap_t draw_image(uint32_t *resolution) {
     cairo_t *xcb_ctx = cairo_create(xcb_output);
 
     if (img || blur_img) {
+        // if we've a blurred image, set that first
+        // we don't need to check tiling since it's already the same size as the root window
         if (blur_img) {
             cairo_set_source_surface(xcb_ctx, blur_img, 0, 0);
             cairo_paint(xcb_ctx);
@@ -173,6 +175,8 @@ xcb_pixmap_t draw_image(uint32_t *resolution) {
     }
 
     /* build indicator color arrays */
+    // I feel like this can be condensed programmatically, or done with macros, or something
+    // eventually I hope to have colors split into a config file or something
     char strgroupsiv[4][3] = {{insidevercolor[0], insidevercolor[1], '\0'},
                               {insidevercolor[2], insidevercolor[3], '\0'},
                               {insidevercolor[4], insidevercolor[5], '\0'},
