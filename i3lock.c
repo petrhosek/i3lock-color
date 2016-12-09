@@ -62,6 +62,8 @@ char keyhlcolor[9] = "33db00ff";
 char bshlcolor[9] = "db3300ff";
 char separatorcolor[9] = "000000ff";
 
+int circle_radius = 90;
+
 /* int defining which display the lock indicator should be shown on. If -1, then show on all displays.*/
 int screen_number = -1;
 /* default is to use the supplied line color, 1 will be ring color, 2 will be to use the inside color for ver/wrong/etc */
@@ -842,6 +844,7 @@ int main(int argc, char *argv[]) {
 
         /* options for unlock indicator colors */
         // defining a lot of different chars here for the options -- TODO find a nicer way for this, maybe not offering single character options at all
+        {"circleradius", required_argument, NULL, 'R'},
         {"insidevercolor", required_argument, NULL, 0},   // --i-v
         {"insidewrongcolor", required_argument, NULL, 0}, // --i-w
         {"insidecolor", required_argument, NULL, 0},      // --i-c
@@ -872,7 +875,7 @@ int main(int argc, char *argv[]) {
     if ((username = pw->pw_name) == NULL)
         errx(EXIT_FAILURE, "pw->pw_name is NULL.\n");
 
-    char *optstring = "hvnbdc:p:ui:teI:frsS:k";
+    char *optstring = "hvnbdc:p:ui:teI:fR:rsS:k";
     while ((o = getopt_long(argc, argv, optstring, longopts, &optind)) != -1) {
         switch (o) {
             case 'v':
@@ -922,6 +925,9 @@ int main(int argc, char *argv[]) {
                 break;
             case 'e':
                 ignore_empty_password = true;
+                break;
+            case 'R':
+                circle_radius = atoi(optarg);
                 break;
             case 'r':
                 if (internal_line_source != 0) {

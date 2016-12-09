@@ -24,7 +24,9 @@
 /* clock stuff */
 #include <time.h>
 
-#define BUTTON_RADIUS 90
+extern int circle_radius;
+
+#define BUTTON_RADIUS (circle_radius)
 #define BUTTON_SPACE (BUTTON_RADIUS + 5)
 #define BUTTON_CENTER (BUTTON_RADIUS + 5)
 #define BUTTON_DIAMETER (2 * BUTTON_SPACE)
