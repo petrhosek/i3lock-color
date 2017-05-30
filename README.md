@@ -1,4 +1,4 @@
-i3lock-color - improved screen locker
+i3lock - improved screen locker
 ===============================
 
 _This is just a re-patched version of i3lock with the commits from [i3lock-color](https://github.com/eBrnd/i3lock-color); all the credit for the color functionality goes to [eBrnd](https://github.com/eBrnd/) !_
@@ -30,15 +30,28 @@ Many little improvements have been made to i3lock over time:
      - `--bshlcolor=rrggbbaa` -- Backspace highlight segments
      - `--line-uses-ring`, `-r` -- the line between the inside and outer ring uses the ring color for its color
      - `--line-uses-inside`, `-s` -- the line between the inside and outer ring uses the inside color for its color
+	- The following additional options have been added:
      - `-S, --screen` -- specifies which display to draw the unlock indicator on
      - `-k, --clock` -- enables the clock display.
+		 - `--indicator` -- forces the indicator to always show, even if there's no activity.
+     - `-B=sigma, --blur` -- enables Gaussian blur. Sigma is the blur radius.
+	      - Note: You can still composite images over the blur (but still under the indicator) with -i.
+				- Eventually there might be an `imagepos` arg, similar to `time` and `datepos`. 
      - `--timestr="%H:%M:%S"` -- allows custom overriding of the time format string. Accepts `strftime` formatting. Default is `"%H:%M:%S"`.
+     - `--timepos="ix:iy-20"` -- position of the time. Expressions using the variables x (current screen's x value), y (current screen's y value), w (screen width), h (screen height), ix (indicator x position), iy (indicator y position) cw (clock width), and ch (clock height) can be used..
+     - `--timecolor=rrggbbaa` -- color of the time string
+     - `--timefont="sans-serif"` -- font used for the time display
+     - `--timesize=32` -- font size for the time display
      - `--datestr="%A, %m %Y"` -- allows custom overriding of the date format string. Accepts `strftime` formatting. Default is `"%A, %m %Y"`.
-  - All the colors have an alpha channel now. Please keep in mind that this was not intended when the program was originally written, so making things transparent that weren't before can make it look strange.
+     - `--datepos="ix:iy-20"` -- position of the date. All the variables in `timepos` can be used here, as well as the additional values tx (time x) and ty (time y).
+     - `--datecolor=rrggbbaa` -- color of the date string
+     - `--datefont="sans-serif"` -- font used for the date display
+     - `--datesize=14` -- font size for the date display
 
 - You can specify whether i3lock should bell upon a wrong password.
 
 - i3lock uses PAM and therefore is compatible with LDAP etc.
+  On OpenBSD i3lock uses the bsd\_auth(3) framework.
 
 Requirements
 ------------
@@ -47,6 +60,8 @@ Requirements
 - libxcb-util
 - libpam-dev
 - libcairo-dev
+- libxcb-composite0
+- libxcb-composite0-dev
 - libxcb-xinerama
 - libev
 - libx11-dev
@@ -56,21 +71,19 @@ Requirements
 
 ##### Ubuntu
 
-    sudo apt-get install pkg-config libxcb1 libpam-dev libcairo-dev libxcb-xinerama0-dev libev-dev libx11-dev libx11-xcb-dev libxkbcommon0 libxkbcommon-x11-0 libxcb-dpms0-dev libxcb-image0-dev libxcb-util0-dev libxcb-xkb-dev libxkbcommon-x11-dev
+    sudo apt-get install pkg-config libxcb1 libpam-dev libcairo-dev libxcb-composite0 libxcb-composite0-dev libxcb-xinerama0-dev libev-dev libx11-dev libx11-xcb-dev libxkbcommon0 libxkbcommon-x11-0 libxcb-dpms0-dev libxcb-image0-dev libxcb-util0-dev libxcb-xkb-dev libxkbcommon-x11-dev libxkbcommon-dev
     
 ##### Aur Package
 https://aur.archlinux.org/packages/i3lock-color-git
 
 Running i3lock
---------------
-Simply invoke the 'i3lock-color' command. To get out of it, enter your password and
+-------------
+Simply invoke the 'i3lock' command. To get out of it, enter your password and
 press enter.
 
-Example usage for colors:
-
-i3lock-color --insidevercolor=0000a0bf --insidewrongcolor=ff8000bf --insidecolor=ffffffbf --ringvercolor=0020ffff --ringwrongcolor=4040ffff --ringcolor=404090ff --textcolor=ffffffff  --separatorcolor=aaaaaaff --keyhlcolor=30ccccff --bshlcolor=ff8000ff -r
-
+On OpenBSD the `i3lock` binary needs to be setgid `auth` to call the
+authentication helpers, e.g. `/usr/libexec/auth/login_passwd`.
 
 Upstream
 --------
-Please submit pull requests for i3lock things to https://github.com/i3/i3lock and pull requests for color things to me at https://github.com/Arcaena/i3lock-color.
+Please submit pull requests for i3lock things to https://github.com/i3/i3lock and pull requests for color things to me at https://github.com/chrjguill/i3lock-color.

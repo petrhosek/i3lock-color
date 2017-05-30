@@ -11,6 +11,7 @@
 #include <xcb/xcb_image.h>
 #include <xcb/xcb_atom.h>
 #include <xcb/xcb_aux.h>
+#include <xcb/composite.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -23,7 +24,7 @@
 #include "cursors.h"
 #include "unlock_indicator.h"
 
-extern pam_state_t pam_state;
+extern auth_state_t auth_state;
 
 xcb_connection_t *conn;
 xcb_screen_t *screen;
@@ -106,6 +107,29 @@ xcb_window_t open_fullscreen_window(xcb_connection_t *conn, xcb_screen_t *scr, c
     uint32_t mask = 0;
     uint32_t values[3];
     xcb_window_t win = xcb_generate_id(conn);
+    xcb_window_t parent_win = scr->root;
+
+    /* Check whether the composite extension is available */
+    const xcb_query_extension_reply_t *extension_query = NULL;
+    xcb_generic_error_t *error = NULL;
+    xcb_composite_get_overlay_window_cookie_t cookie;
+    xcb_composite_get_overlay_window_reply_t *composite_reply = NULL;
+
+    extension_query = xcb_get_extension_data(conn, &xcb_composite_id);
+    if (extension_query && extension_query->present) {
+        /* When composition is used, we need to use the composite overlay
+         * window instead of the normal root window to be able to cover
+         * composited windows */
+        cookie = xcb_composite_get_overlay_window(conn, scr->root);
+        composite_reply = xcb_composite_get_overlay_window_reply(conn, cookie, &error);
+
+        if (!error && composite_reply) {
+            parent_win = composite_reply->overlay_win;
+        }
+
+        free(composite_reply);
+        free(error);
+    }
 
     if (pixmap == XCB_NONE) {
         mask |= XCB_CW_BACK_PIXEL;
@@ -127,8 +151,8 @@ xcb_window_t open_fullscreen_window(xcb_connection_t *conn, xcb_screen_t *scr, c
 
     xcb_create_window(conn,
                       XCB_COPY_FROM_PARENT,
-                      win,       /* the window id */
-                      scr->root, /* parent == root */
+                      win, /* the window id */
+                      parent_win,
                       0, 0,
                       scr->width_in_pixels,
                       scr->height_in_pixels, /* dimensions */
@@ -238,7 +262,7 @@ void grab_pointer_and_keyboard(xcb_connection_t *conn, xcb_screen_t *screen, xcb
     /* After trying for 10000 times, i3lock will display an error message
      * for 2 sec prior to terminate. */
     if (tries <= 0) {
-        pam_state = STATE_I3LOCK_LOCK_FAILED;
+        auth_state = STATE_I3LOCK_LOCK_FAILED;
         redraw_screen();
         sleep(1);
         errx(EXIT_FAILURE, "Cannot grab pointer/keyboard");
@@ -306,4 +330,18 @@ xcb_cursor_t create_cursor(xcb_connection_t *conn, xcb_screen_t *screen, xcb_win
     xcb_free_pixmap(conn, mask);
 
     return cursor;
+}
+
+xcb_pixmap_t capture_bg_pixmap(xcb_connection_t *conn, xcb_screen_t *scr, u_int32_t * resolution) {
+    xcb_pixmap_t bg_pixmap = xcb_generate_id(conn);
+    xcb_create_pixmap(conn, scr->root_depth, bg_pixmap, scr->root, resolution[0], resolution[1]);
+    xcb_gcontext_t gc = xcb_generate_id(conn);
+    uint32_t values[] = { scr->black_pixel, 1};
+    xcb_create_gc(conn, gc, bg_pixmap, XCB_GC_FOREGROUND | XCB_GC_SUBWINDOW_MODE, values);
+    xcb_rectangle_t rect = { 0, 0, resolution[0], resolution[1] };
+    xcb_poly_fill_rectangle(conn, bg_pixmap, gc, 1, &rect);
+    xcb_copy_area(conn, scr->root, bg_pixmap, gc, 0, 0, 0, 0, resolution[0], resolution[1]);
+    xcb_flush(conn);
+    xcb_free_gc(conn, gc);
+    return bg_pixmap;
 }

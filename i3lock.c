@@ -18,7 +18,11 @@
 #include <xcb/xkb.h>
 #include <err.h>
 #include <assert.h>
+#ifdef __OpenBSD__
+#include <bsd_auth.h>
+#else
 #include <security/pam_appl.h>
+#endif
 #include <getopt.h>
 #include <string.h>
 #include <ev.h>
@@ -30,12 +34,16 @@
 #include <xkbcommon/xkbcommon-x11.h>
 #include <cairo.h>
 #include <cairo/cairo-xcb.h>
+#ifdef __OpenBSD__
+#include <strings.h> /* explicit_bzero(3) */
+#endif
 
 #include "i3lock.h"
 #include "xcb.h"
 #include "cursors.h"
 #include "unlock_indicator.h"
 #include "xinerama.h"
+#include "blur.h"
 
 #define TSTAMP_N_SECS(n) (n * 1.0)
 #define TSTAMP_N_MINS(n) (60 * TSTAMP_N_SECS(n))
@@ -58,6 +66,8 @@ char ringwrongcolor[9] = "7d3300ff";
 char ringcolor[9] = "337d00ff";
 char linecolor[9] = "000000ff";
 char textcolor[9] = "000000ff";
+char timecolor[9] = "000000ff";
+char datecolor[9] = "000000ff";
 char keyhlcolor[9] = "33db00ff";
 char bshlcolor[9] = "db3300ff";
 char separatorcolor[9] = "000000ff";
@@ -70,18 +80,35 @@ int screen_number = -1;
 int internal_line_source = 0;
 /* bool for showing the clock; why am I commenting this? */
 bool show_clock = false;
+bool show_indicator = false;
+float refresh_rate = 1.0;
 /* time formatter strings for date/time
     I picked 32-length char arrays because some people might want really funky time formatters.
     Who am I to judge?
 */
 char time_format[32] = "%H:%M:%S\0";
 char date_format[32] = "%A, %m %Y\0";
+char time_font[32] = "sans-serif\0";
+char date_font[32] = "sans-serif\0";
+char time_x_expr[32] = "ix - (cw / 2)\0";
+char time_y_expr[32] = "iy - (ch / 2)\0";
+char date_x_expr[32] = "tx\0";
+char date_y_expr[32] = "ty+30\0";
 
+double time_size = 32;
+double date_size = 14;
+
+/* opts for blurring */
+bool blur = false;
+bool step_blur = false;
+int blur_sigma = 5;
 
 uint32_t last_resolution[2];
 xcb_window_t win;
 static xcb_cursor_t cursor;
+#ifndef __OpenBSD__
 static pam_handle_t *pam_handle;
+#endif
 int input_position = 0;
 /* Holds the password you enter (in UTF-8). */
 static char password[512];
@@ -91,11 +118,11 @@ bool unlock_indicator = true;
 char *modifier_string = NULL;
 static bool dont_fork = false;
 struct ev_loop *main_loop;
-static struct ev_timer *clear_pam_wrong_timeout;
+static struct ev_timer *clear_auth_wrong_timeout;
 static struct ev_timer *clear_indicator_timeout;
 static struct ev_timer *discard_passwd_timeout;
 extern unlock_state_t unlock_state;
-extern pam_state_t pam_state;
+extern auth_state_t auth_state;
 int failed_attempts = 0;
 bool show_failed_attempts = false;
 bool retry_verification = false;
@@ -111,6 +138,7 @@ static uint8_t xkb_base_event;
 static uint8_t xkb_base_error;
 
 cairo_surface_t *img = NULL;
+cairo_surface_t *blur_img = NULL;
 bool tile = false;
 bool ignore_empty_password = false;
 bool skip_repeated_empty_password = false;
@@ -194,6 +222,11 @@ static bool load_compose_table(const char *locale) {
  *
  */
 static void clear_password_memory(void) {
+#ifdef __OpenBSD__
+    /* Use explicit_bzero(3) which was explicitly designed not to be
+     * optimized out by the compiler. */
+    explicit_bzero(password, strlen(password));
+#else
     /* A volatile pointer to the password buffer to prevent the compiler from
      * optimizing this out. */
     volatile char *vpassword = password;
@@ -203,6 +236,7 @@ static void clear_password_memory(void) {
          * compiler from optimizing the calls away, since the value of 'beep'
          * is not known at compile-time. */
         vpassword[c] = c + (int)beep;
+#endif
 }
 
 ev_timer *start_timer(ev_timer *timer_obj, ev_tstamp timeout, ev_callback_t callback) {
@@ -242,13 +276,13 @@ static void finish_input(void) {
 }
 
 /*
- * Resets pam_state to STATE_PAM_IDLE 2 seconds after an unsuccessful
+ * Resets auth_state to STATE_AUTH_IDLE 2 seconds after an unsuccessful
  * authentication event.
  *
  */
-static void clear_pam_wrong(EV_P_ ev_timer *w, int revents) {
-    DEBUG("clearing pam wrong\n");
-    pam_state = STATE_PAM_IDLE;
+static void clear_auth_wrong(EV_P_ ev_timer *w, int revents) {
+    DEBUG("clearing auth wrong\n");
+    auth_state = STATE_AUTH_IDLE;
     redraw_screen();
 
     /* Clear modifier string. */
@@ -258,9 +292,9 @@ static void clear_pam_wrong(EV_P_ ev_timer *w, int revents) {
     }
 
     /* Now free this timeout. */
-    STOP_TIMER(clear_pam_wrong_timeout);
+    STOP_TIMER(clear_auth_wrong_timeout);
 
-    /* retry with input done during pam verification */
+    /* retry with input done during auth verification */
     if (retry_verification) {
         retry_verification = false;
         finish_input();
@@ -284,11 +318,24 @@ static void discard_passwd_cb(EV_P_ ev_timer *w, int revents) {
 }
 
 static void input_done(void) {
-    STOP_TIMER(clear_pam_wrong_timeout);
-    pam_state = STATE_PAM_VERIFY;
+    STOP_TIMER(clear_auth_wrong_timeout);
+    auth_state = STATE_AUTH_VERIFY;
     unlock_state = STATE_STARTED;
     redraw_screen();
 
+#ifdef __OpenBSD__
+    struct passwd *pw;
+
+    if (!(pw = getpwuid(getuid())))
+        errx(1, "unknown uid %u.", getuid());
+
+    if (auth_userokay(pw->pw_name, NULL, NULL, password) != 0) {
+        DEBUG("successfully authenticated\n");
+        clear_password_memory();
+
+        exit(0);
+    }
+#else
     if (pam_authenticate(pam_handle, 0) == PAM_SUCCESS) {
         DEBUG("successfully authenticated\n");
         clear_password_memory();
@@ -302,12 +349,13 @@ static void input_done(void) {
 
         exit(0);
     }
+#endif
 
     if (debug_mode)
         fprintf(stderr, "Authentication failure\n");
 
     /* Get state of Caps and Num lock modifiers, to be displayed in
-     * STATE_PAM_WRONG state */
+     * STATE_AUTH_WRONG state */
     xkb_mod_index_t idx, num_mods;
     const char *mod_name;
 
@@ -341,7 +389,7 @@ static void input_done(void) {
         }
     }
 
-    pam_state = STATE_PAM_WRONG;
+    auth_state = STATE_AUTH_WRONG;
     failed_attempts += 1;
     clear_input();
     if (unlock_indicator)
@@ -350,7 +398,7 @@ static void input_done(void) {
     /* Clear this state after 2 seconds (unless the user enters another
      * password during that time). */
     ev_now_update(main_loop);
-    START_TIMER(clear_pam_wrong_timeout, TSTAMP_N_SECS(2), clear_pam_wrong);
+    START_TIMER(clear_auth_wrong_timeout, TSTAMP_N_SECS(2), clear_auth_wrong);
 
     /* Cancel the clear_indicator_timeout, it would hide the unlock indicator
      * too early. */
@@ -435,7 +483,7 @@ static void handle_key_press(xcb_key_press_event_t *event) {
             if ((ksym == XKB_KEY_j || ksym == XKB_KEY_m) && !ctrl)
                 break;
 
-            if (pam_state == STATE_PAM_WRONG) {
+            if (auth_state == STATE_AUTH_WRONG) {
                 retry_verification = true;
                 return;
             }
@@ -639,6 +687,7 @@ void handle_screen_resize(void) {
     redraw_screen();
 }
 
+#ifndef __OpenBSD__
 /*
  * Callback function for PAM. We only react on password request callbacks.
  *
@@ -669,6 +718,7 @@ static int conv_callback(int num_msg, const struct pam_message **msg,
 
     return 0;
 }
+#endif
 
 /*
  * This callback is only a dummy, see xcb_prepare_cb and xcb_check_cb.
@@ -767,7 +817,7 @@ static void xcb_check_cb(EV_P_ ev_check *w, int revents) {
 /*
  * This function is called from a fork()ed child and will raise the i3lock
  * window when the window is obscured, even when the main i3lock process is
- * blocked due to PAM.
+ * blocked due to the authentication backend.
  *
  */
 static void raise_loop(xcb_window_t window) {
@@ -824,8 +874,10 @@ int main(int argc, char *argv[]) {
     struct passwd *pw;
     char *username;
     char *image_path = NULL;
+#ifndef __OpenBSD__
     int ret;
     struct pam_conv conv = {conv_callback, NULL};
+#endif
     int curs_choice = CURS_NONE;
     int o;
     int optind = 0;
@@ -853,17 +905,31 @@ int main(int argc, char *argv[]) {
         {"ringcolor", required_argument, NULL, 0},        // --r-c
         {"linecolor", required_argument, NULL, 0},        // --l-c
         {"textcolor", required_argument, NULL, 0},        // --t-c
+        {"timecolor", required_argument, NULL, 0},       
+        {"datecolor", required_argument, NULL, 0},       
         {"keyhlcolor", required_argument, NULL, 0},       // --k-c
         {"bshlcolor", required_argument, NULL, 0},        // --b-c
         {"separatorcolor", required_argument, NULL, 0},
         {"line-uses-ring", no_argument, NULL, 'r'},
         {"line-uses-inside", no_argument, NULL, 's'},
-        /* s for in_s_ide; ideally I'd use -I but that's used for timeout, which should use -T, but compatibility argh */
+        /* s for in_s_ide; ideally I'd use -I but that's used for timeout, which should use -T, but compatibility argh 
+         * note: `I` has been deprecated for a while, so I might just remove that and reshuffle that? */
         {"screen", required_argument, NULL, 'S'},
 
         {"clock", no_argument, NULL, 'k'},
+        {"indicator", no_argument, NULL, 0},
+        {"refresh-rate", required_argument, NULL, 0},
+        
         {"timestr", required_argument, NULL, 0},
         {"datestr", required_argument, NULL, 0},
+        {"timefont", required_argument, NULL, 0},
+        {"datefont", required_argument, NULL, 0},
+        {"timesize", required_argument, NULL, 0},
+        {"datesize", required_argument, NULL, 0},
+        {"timepos", required_argument, NULL, 0},
+        {"datepos", required_argument, NULL, 0},
+
+        {"blur", required_argument, NULL, 'B'},
 
         {"ignore-empty-password", no_argument, NULL, 'e'},
         {"inactivity-timeout", required_argument, NULL, 'I'},
@@ -875,7 +941,7 @@ int main(int argc, char *argv[]) {
     if ((username = pw->pw_name) == NULL)
         errx(EXIT_FAILURE, "pw->pw_name is NULL.\n");
 
-    char *optstring = "hvnbdc:p:ui:teI:fR:rsS:k";
+    char *optstring = "hvnbdc:p:ui:teI:frsS:kB:R:";
     while ((o = getopt_long(argc, argv, optstring, longopts, &optind)) != -1) {
         switch (o) {
             case 'v':
@@ -948,9 +1014,16 @@ int main(int argc, char *argv[]) {
             case 'k':
                 show_clock = true;
                 break;
+            case 'B':
+                blur = true;
+                blur_sigma = atoi(optarg);
+                break;
             case 0:
                 if (strcmp(longopts[optind].name, "debug") == 0)
                     debug_mode = true;
+                else if (strcmp(longopts[optind].name, "indicator") == 0) {
+                    show_indicator = true;
+                }
                 else if (strcmp(longopts[optind].name, "insidevercolor") == 0) {
                     char *arg = optarg;
 
@@ -959,7 +1032,7 @@ int main(int argc, char *argv[]) {
                         arg++;
 
                     if (strlen(arg) != 8 || sscanf(arg, "%08[0-9a-fA-F]", insidevercolor) != 1)
-                        errx(1, "insidevercolor is invalid, color must be given in 8-byte format: rrggbbaa\n");
+                        errx(1, "insidevercolor is invalid, color must be given in 4-byte format: rrggbbaa\n");
                 }
                 else if (strcmp(longopts[optind].name, "insidewrongcolor") == 0) {
                     char *arg = optarg;
@@ -969,7 +1042,7 @@ int main(int argc, char *argv[]) {
                         arg++;
 
                     if (strlen(arg) != 8 || sscanf(arg, "%08[0-9a-fA-F]", insidewrongcolor) != 1)
-                        errx(1, "insidewrongcolor is invalid, color must be given in 8-byte format: rrggbbaa\n");
+                        errx(1, "insidewrongcolor is invalid, color must be given in 4-byte format: rrggbbaa\n");
                 }
                 else if (strcmp(longopts[optind].name, "insidecolor") == 0) {
                     char *arg = optarg;
@@ -979,7 +1052,7 @@ int main(int argc, char *argv[]) {
                         arg++;
 
                     if (strlen(arg) != 8 || sscanf(arg, "%08[0-9a-fA-F]", insidecolor) != 1)
-                        errx(1, "insidecolor is invalid, color must be given in 8-byte format: rrggbbaa\n");
+                        errx(1, "insidecolor is invalid, color must be given in 4-byte format: rrggbbaa\n");
                 }
                 else if (strcmp(longopts[optind].name, "ringvercolor") == 0) {
                     char *arg = optarg;
@@ -989,7 +1062,7 @@ int main(int argc, char *argv[]) {
                         arg++;
 
                     if (strlen(arg) != 8 || sscanf(arg, "%08[0-9a-fA-F]", ringvercolor) != 1)
-                        errx(1, "ringvercolor is invalid, color must be given in 8-byte format: rrggbb\n");
+                        errx(1, "ringvercolor is invalid, color must be given in 4-byte format: rrggbb\n");
                 }
                 else if (strcmp(longopts[optind].name, "ringwrongcolor") == 0) {
                     char *arg = optarg;
@@ -999,7 +1072,7 @@ int main(int argc, char *argv[]) {
                         arg++;
 
                     if (strlen(arg) != 8 || sscanf(arg, "%08[0-9a-fA-F]", ringwrongcolor) != 1)
-                        errx(1, "ringwrongcolor is invalid, color must be given in 8-byte format: rrggbb\n");
+                        errx(1, "ringwrongcolor is invalid, color must be given in r-byte format: rrggbb\n");
                 }
                 else if (strcmp(longopts[optind].name, "ringcolor") == 0) {
                     char *arg = optarg;
@@ -1009,7 +1082,7 @@ int main(int argc, char *argv[]) {
                         arg++;
 
                     if (strlen(arg) != 8 || sscanf(arg, "%08[0-9a-fA-F]", ringcolor) != 1)
-                        errx(1, "ringcolor is invalid, color must be given in 8-byte format: rrggbb\n");
+                        errx(1, "ringcolor is invalid, color must be given in 4-byte format: rrggbb\n");
                 }
                 else if (strcmp(longopts[optind].name, "linecolor") == 0) {
                     char *arg = optarg;
@@ -1019,7 +1092,7 @@ int main(int argc, char *argv[]) {
                         arg++;
 
                     if (strlen(arg) != 8 || sscanf(arg, "%08[0-9a-fA-F]", linecolor) != 1)
-                        errx(1, "linecolor is invalid, color must be given in 8-byte format: rrggbb\n");
+                        errx(1, "linecolor is invalid, color must be given in 4-byte format: rrggbb\n");
                 }
                 else if (strcmp(longopts[optind].name, "textcolor") == 0) {
                     char *arg = optarg;
@@ -1029,7 +1102,27 @@ int main(int argc, char *argv[]) {
                         arg++;
 
                     if (strlen(arg) != 8 || sscanf(arg, "%08[0-9a-fA-F]", textcolor) != 1)
-                        errx(1, "textcolor is invalid, color must be given in 8-byte format: rrggbb\n");
+                        errx(1, "textcolor is invalid, color must be given in 4-byte format: rrggbbaa\n");
+                }
+                else if (strcmp(longopts[optind].name, "timecolor") == 0) {
+                    char *arg = optarg;
+
+                    /* Skip # if present */
+                    if (arg[0] == '#')
+                        arg++;
+
+                    if (strlen(arg) != 8 || sscanf(arg, "%08[0-9a-fA-F]", timecolor) != 1)
+                        errx(1, "timecolor is invalid, color must be given in 4-byte format: rrggbbaa\n");
+                }
+                else if (strcmp(longopts[optind].name, "datecolor") == 0) {
+                    char *arg = optarg;
+
+                    /* Skip # if present */
+                    if (arg[0] == '#')
+                        arg++;
+
+                    if (strlen(arg) != 8 || sscanf(arg, "%08[0-9a-fA-F]", datecolor) != 1)
+                        errx(1, "datecolor is invalid, color must be given in 4-byte format: rrggbbaa\n");
                 }
                 else if (strcmp(longopts[optind].name, "keyhlcolor") == 0) {
                     char *arg = optarg;
@@ -1039,7 +1132,7 @@ int main(int argc, char *argv[]) {
                         arg++;
 
                     if (strlen(arg) != 8 || sscanf(arg, "%08[0-9a-fA-F]", keyhlcolor) != 1)
-                        errx(1, "keyhlcolor is invalid, color must be given in 8-byte format: rrggbb\n");
+                        errx(1, "keyhlcolor is invalid, color must be given in 4-byte format: rrggbbaa\n");
                 }
                 else if (strcmp(longopts[optind].name, "bshlcolor") == 0) {
                     char *arg = optarg;
@@ -1049,7 +1142,7 @@ int main(int argc, char *argv[]) {
                         arg++;
 
                     if (strlen(arg) != 8 || sscanf(arg, "%08[0-9a-fA-F]", bshlcolor) != 1)
-                        errx(1, "bshlcolor is invalid, color must be given in 8-byte format: rrggbb\n");
+                        errx(1, "bshlcolor is invalid, color must be given in 4-byte format: rrggbbaa\n");
                 }
                 else if (strcmp(longopts[optind].name, "separatorcolor") == 0) {
                     char *arg = optarg;
@@ -1059,29 +1152,92 @@ int main(int argc, char *argv[]) {
                         arg++;
 
                     if (strlen(arg) != 8 || sscanf(arg, "%08[0-9a-fA-F]", separatorcolor) != 1)
-                        errx(1, "separator is invalid, color must be given in 8-byte format: rrggbb\n");
+                        errx(1, "separator is invalid, color must be given in 4-byte format: rrggbbaa\n");
                 }
                 else if (strcmp(longopts[optind].name, "timestr") == 0) {
                     //read in to timestr
                     if (strlen(optarg) > 31) {
-                        errx(1, "time format string can be at most 31 characters");
+                        errx(1, "time format string can be at most 31 characters\n");
                     }
                     strcpy(time_format,optarg);
                 }
                 else if (strcmp(longopts[optind].name, "datestr") == 0) {
                     //read in to datestr
                     if (strlen(optarg) > 31) {
-                        errx(1, "time format string can be at most 31 characters");
+                        errx(1, "time format string can be at most 31 characters\n");
                     }
                     strcpy(date_format,optarg);
+                }
+                else if (strcmp(longopts[optind].name, "timefont") == 0) {
+                    //read in to time_font
+                    if (strlen(optarg) > 31) {
+                        errx(1, "time font string can be at most 31 characters\n");
+                    }
+                    strcpy(time_font,optarg);
+                }
+                else if (strcmp(longopts[optind].name, "datefont") == 0) {
+                    //read in to date_font
+                    if (strlen(optarg) > 31) {
+                        errx(1, "date font string can be at most 31 characters\n");
+                    }
+                    strcpy(date_font,optarg);
+                }
+                else if (strcmp(longopts[optind].name, "timesize") == 0) {
+                    char *arg = optarg;
+
+                    if (sscanf(arg, "%lf", &time_size) != 1)
+                        errx(1, "timesize must be a number\n");
+                    if (time_size < 1)
+                        errx(1, "timesize must be larger than 0\n");
+                }
+                else if (strcmp(longopts[optind].name, "datesize") == 0) {
+                    char *arg = optarg;
+
+                    if (sscanf(arg, "%lf", &date_size) != 1)
+                        errx(1, "datesize must be a number\n");
+                    if (date_size < 1)
+                        errx(1, "datesize must be larger than 0\n");
+                }
+                else if (strcmp(longopts[optind].name, "timepos") == 0) {
+                    //read in to time_x_expr and time_y_expr
+                    if (strlen(optarg) > 31) {
+                        // this is overly restrictive since both the x and y string buffers have size 32, but it's easier to check.
+                        errx(1, "date position string can be at most 31 characters\n");
+                    }
+                    char* arg = optarg;
+                    if (sscanf(arg, "%30[^:]:%30[^:]", time_x_expr, time_y_expr) != 2) {
+                        errx(1, "timepos must be of the form x:y\n");
+                    }
+                }
+                else if (strcmp(longopts[optind].name, "datepos") == 0) {
+                    //read in to date_x_expr and date_y_expr
+                    if (strlen(optarg) > 31) {
+                        // this is overly restrictive since both the x and y string buffers have size 32, but it's easier to check.
+                        errx(1, "date position string can be at most 31 characters\n");
+                    }
+                    char* arg = optarg;
+                    if (sscanf(arg, "%30[^:]:%30[^:]", date_x_expr, date_y_expr) != 2) {
+                        errx(1, "datepos must be of the form x:y\n");
+                    }
+                }
+                else if (strcmp(longopts[optind].name, "refresh-rate") == 0) {
+                    //read in to date_x_expr and date_y_expr
+                    char* arg = optarg;
+                    refresh_rate = strtof(arg, NULL);
+                    if (refresh_rate < 1.0) {
+                        fprintf(stderr, "The given refresh rate of %fs is less than one second and was ignored.\n", refresh_rate);
+                        refresh_rate = 1.0;
+                    }
                 }
                 break;
             case 'f':
                 show_failed_attempts = true;
                 break;
             default:
-                errx(EXIT_FAILURE, "Syntax: i3lock-color [-v] [-n] [-b] [-d] [-c color] [-u] [-p win|default]"
-                                   " [-i image.png] [-t] [-e] [-I timeout] [-f] [-r|s] [-S screen_number] [-k] [--fuckton-of-color-args=rrggbbaa]");
+                // TODO: clean this up, use newlines
+                errx(EXIT_FAILURE, "Syntax: i3lock [-v] [-n] [-b] [-d] [-c color] [-u] [-p win|default]"
+                                   " [-i image.png] [-t] [-e] [-f]\n"
+                                   "Please see the manpage for a full list of arguments.");
         }
     }
 
@@ -1089,16 +1245,20 @@ int main(int argc, char *argv[]) {
      * the unlock indicator upon keypresses. */
     srand(time(NULL));
 
+#ifndef __OpenBSD__
     /* Initialize PAM */
     if ((ret = pam_start("i3lock", username, &conv, &pam_handle)) != PAM_SUCCESS)
         errx(EXIT_FAILURE, "PAM: %s", pam_strerror(pam_handle, ret));
 
     if ((ret = pam_set_item(pam_handle, PAM_TTY, getenv("DISPLAY"))) != PAM_SUCCESS)
         errx(EXIT_FAILURE, "PAM: %s", pam_strerror(pam_handle, ret));
+#endif
 
-/* Using mlock() as non-super-user seems only possible in Linux. Users of other
- * operating systems should use encrypted swap/no swap (or remove the ifdef and
- * run i3lock as super-user). */
+/* Using mlock() as non-super-user seems only possible in Linux.
+ * Users of other operating systems should use encrypted swap/no swap
+ * (or remove the ifdef and run i3lock as super-user).
+ * Alas, swap is encrypted by default on OpenBSD so swapping out
+ * is not necessarily an issue. */
 #if defined(__linux__)
     /* Lock the area where we store the password in memory, we don’t want it to
      * be swapped to disk. Since Linux 2.6.9, this does not require any
@@ -1189,17 +1349,40 @@ int main(int argc, char *argv[]) {
         free(image_path);
     }
 
+    xcb_pixmap_t* blur_pixmap = NULL;
+    if (blur) {
+        blur_pixmap = malloc(sizeof(xcb_pixmap_t));
+        xcb_visualtype_t *vistype = get_root_visual_type(screen);
+        *blur_pixmap = capture_bg_pixmap(conn, screen, last_resolution);
+        cairo_surface_t *xcb_img = cairo_xcb_surface_create(conn, *blur_pixmap, vistype, last_resolution[0], last_resolution[1]);
+
+        blur_img = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, last_resolution[0], last_resolution[1]);
+        cairo_t *ctx = cairo_create(blur_img);
+        cairo_set_source_surface(ctx, xcb_img, 0, 0);
+        cairo_paint(ctx);
+
+        cairo_destroy(ctx);
+        cairo_surface_destroy(xcb_img);
+        blur_image_surface(blur_img, blur_sigma);
+    }
+
     /* Pixmap on which the image is rendered to (if any) */
     xcb_pixmap_t bg_pixmap = draw_image(last_resolution);
 
     /* Open the fullscreen window, already with the correct pixmap in place */
     win = open_fullscreen_window(conn, screen, color, bg_pixmap);
     xcb_free_pixmap(conn, bg_pixmap);
+    if (blur_pixmap) {
+        xcb_free_pixmap(conn, *blur_pixmap);
+        free(blur_pixmap);
+        blur_pixmap = NULL;
+    }
+
 
     cursor = create_cursor(conn, screen, win, curs_choice);
 
     /* Display the "locking…" message while trying to grab the pointer/keyboard. */
-    pam_state = STATE_PAM_LOCK;
+    auth_state = STATE_AUTH_LOCK;
     grab_pointer_and_keyboard(conn, screen, cursor);
 
     pid_t pid = fork();
@@ -1226,7 +1409,7 @@ int main(int argc, char *argv[]) {
         errx(EXIT_FAILURE, "Could not initialize libev. Bad LIBEV_FLAGS?\n");
 
     /* Explicitly call the screen redraw in case "locking…" message was displayed */
-    pam_state = STATE_PAM_IDLE;
+    auth_state = STATE_AUTH_IDLE;
     redraw_screen();
 
     struct ev_io *xcb_watcher = calloc(sizeof(struct ev_io), 1);
