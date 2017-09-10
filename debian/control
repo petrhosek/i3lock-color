@@ -1,0 +1,38 @@
+Source: i3lock-color
+Section: utils
+Priority: optional
+Maintainer: Petr Hosek <phosek@google.com>
+Build-Depends: debhelper (>= 9),
+               pkg-config,
+               libpam0g-dev,
+               libcairo2-dev,
+               libxcb1-dev,
+               libxcb-dpms0-dev,
+               libxcb-image0-dev,
+               libxcb-util0-dev,
+               libev-dev,
+               libxcb-xinerama0-dev,
+               libxkbcommon-dev (>= 0.5.0),
+               libxkbcommon-x11-dev (>= 0.5.0),
+               libxcb-xkb-dev,
+               libxcb-composite0-dev
+Standards-Version: 3.9.8
+Homepage: https://github.com/chrjguill/i3lock-color
+
+Package: i3lock-color
+Architecture: any
+Section: x11
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: improved screen locker
+ i3lock is a simple screen locker like slock. After starting it, you will
+ see a white screen (you can configure the color/an image). You can return
+ to your screen by entering your password.
+ .
+ i3lock forks so you can combine it with an alias to suspend to RAM.
+ .
+ You can specify either a background color or a PNG image which will be
+ displayed while your screen is locked.
+ .
+ You can specify whether i3lock should bell upon a wrong password.
+ .
+ i3lock uses PAM and therefore is compatible with LDAP etc.
